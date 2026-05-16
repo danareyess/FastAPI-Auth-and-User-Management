@@ -3,6 +3,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
 
+from google.oauth2 import id_token
+from google.auth.transport import requests
+from pydantic import BaseModel
+
+# FastAPI recibe un JSON con el token
+class GoogleTokenRequest(BaseModel):
+    id_token: str
+
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -206,6 +214,42 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
     return create_tokens(user.id)
+
+
+GOOGLE_CLIENT_ID = "437346837668-4aed9bubi45tsd62an8tsvfum47jgvao.apps.googleusercontent.com"
+
+@app.post("/api/auth/google", response_model=TokenResponse)
+async def google_auth(req: GoogleTokenRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        id_info = id_token.verify_oauth2_token(
+            req.id_token, 
+            requests.Request(), 
+            GOOGLE_CLIENT_ID
+        )
+
+        email = id_info.get("email")
+        full_name = id_info.get("name", "")
+        
+        username = email.split("@")[0]
+
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            user = User(
+                email=email,
+                username=username,
+                hashed_password=hash_password("google_oauth_secure_password_placeholder"),
+                full_name=full_name,
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+
+        return create_tokens(user.id)
+
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Token de Google inválido o expirado")
 
 @app.post("/api/auth/refresh", response_model=TokenResponse)
 async def refresh_token(request: Request, db: AsyncSession = Depends(get_db)):
